@@ -21,7 +21,7 @@ alvo realista para o pipeline.
 | Método | Rota | Descrição |
 |---|---|---|
 | `GET` | `/health` | Health check consumido pelo Docker e pelo teste de fumaça pós-deploy |
-| `GET` | `/tasks` | Lista tarefas, com filtro opcional `?completed=true|false` |
+| `GET` | `/tasks` | Lista tarefas, com filtro opcional `?completed=true` ou `?completed=false` |
 | `GET` | `/tasks/{id}` | Detalha uma tarefa |
 | `POST` | `/tasks` | Cria uma tarefa |
 | `PATCH` | `/tasks/{id}` | Atualização parcial |
@@ -36,7 +36,7 @@ alvo realista para o pipeline.
 git clone https://github.com/levimbraga/taskflow-api.git
 cd taskflow-api
 
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 
 uvicorn app.main:app --reload
@@ -73,7 +73,7 @@ terraform-validate ───────────┘
 | Job | O que faz | Falha quando |
 |---|---|---|
 | `lint` | Análise estática com ruff | Estilo, imports ou formatação fora do padrão |
-|  `test` | pytest em matriz de versões (3.12 e 3.14), com cobertura | Qualquer teste falha ou cobertura < 90% |
+| `test` | pytest em matriz de versões (3.12 e 3.14), com cobertura | Qualquer teste falha ou cobertura < 90% |
 | `terraform-validate` | `fmt -check`, `init -backend=false`, `validate` | Sintaxe ou formatação inválida no IaC |
 | `build` | Constrói a imagem e valida o health check dentro do contêiner | Build quebra ou a app não sobe |
 
@@ -81,7 +81,7 @@ terraform-validate ───────────┘
 
 - `lint` roda primeiro e sozinho porque é a etapa mais barata — falha em
   segundos e evita gastar minutos de runner com código mal formatado.
--  `test` e `terraform-validate` são independentes e rodam em paralelo.
+- `test` e `terraform-validate` são independentes e rodam em paralelo.
 - `build` só publica no GHCR quando o commit está em `main`; em Pull Requests a
   imagem é construída e testada, mas não publicada.
 - `terraform init -backend=false` permite validar o IaC **sem credenciais AWS**.
@@ -102,12 +102,12 @@ terraform-validate ───────────┘
 | `tests/test_health.py` | Fumaça | Health check e disponibilidade do OpenAPI |
 
 O `pyproject.toml` impõe **cobertura mínima de 90%** via `--cov-fail-under=90`;
-a cobertura atual é de **~98%**. O isolamento entre testes é garantido pela
+a cobertura atual é de **97%**. O isolamento entre testes é garantido pela
 fixture `client`, que limpa o repositório antes e depois de cada caso.
 
 ```bash
 $ ./scripts/test.sh
-19 passed — Total coverage: 97.65%
+19 passed — Total coverage: 97.40%
 ```
 
 ---
