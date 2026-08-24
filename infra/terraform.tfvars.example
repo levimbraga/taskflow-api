@@ -1,0 +1,15 @@
+# Copie para terraform.tfvars e ajuste. O arquivo terraform.tfvars está no
+# .gitignore justamente para não versionar configurações locais.
+
+aws_region      = "us-east-1"
+project_name    = "taskflow"
+environment     = "dev"
+instance_type   = "t3.micro"
+
+# Substitua pelo caminho da imagem publicada pelo seu pipeline no GHCR.
+container_image = "ghcr.io/levimbraga/taskflow-api:latest"
+
+# Só habilite SSH se realmente precisar, e sempre restringindo ao seu IP.
+enable_ssh       = false
+ssh_ingress_cidr = "SEU.IP.AQUI/32"
+key_pair_name    = ""

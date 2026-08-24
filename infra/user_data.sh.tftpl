@@ -1,0 +1,37 @@
+#!/bin/bash
+# Script de inicialização da instância, renderizado pelo Terraform.
+set -euxo pipefail
+
+dnf update -y
+dnf install -y docker
+
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+# Agente do CloudWatch para enviar os logs do contêiner ao grupo criado pelo Terraform
+dnf install -y amazon-cloudwatch-agent
+
+docker pull ${container_image}
+
+docker run -d \
+  --name taskflow-api \
+  --restart unless-stopped \
+  -p 80:${app_port} \
+  --log-driver=awslogs \
+  --log-opt awslogs-region=${aws_region} \
+  --log-opt awslogs-group=${log_group} \
+  --log-opt awslogs-create-group=true \
+  ${container_image}
+
+# Teste de fumaça pós-deploy: aguarda a aplicação responder antes de concluir
+for attempt in $(seq 1 30); do
+  if curl -fsS http://localhost/health > /dev/null; then
+    echo "TaskFlow API respondeu ao health check na tentativa $attempt"
+    exit 0
+  fi
+  sleep 5
+done
+
+echo "A aplicacao nao respondeu ao health check apos 30 tentativas" >&2
+docker logs taskflow-api >&2
+exit 1

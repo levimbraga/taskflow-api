@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+coverage.xml
+.coverage
+
+# Terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+
+# Credenciais - NUNCA versionar
+*.pem
+.env
+credentials
+
+# SO / editor
+.DS_Store
+.idea/
+.vscode/

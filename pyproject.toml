@@ -1,0 +1,20 @@
+[project]
+name = "taskflow-api"
+version = "1.0.0"
+description = "API REST de gerenciamento de tarefas - DevOps na Prática (PUCRS)"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --strict-markers --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=90"
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "C4", "SIM"]
