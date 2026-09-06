@@ -206,11 +206,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publicar imagem com as tags sha e latest
+      # A imagem é publicada apenas com a tag do commit — é uma *candidata*.
+      # A tag :latest, que é a observada pelo Watchtower na instância EC2, só é
+      # movida pelo pipeline de CD (cd.yml), depois da aprovação manual no
+      # environment 'producao'. Publicar :latest já aqui faria o deploy
+      # acontecer sozinho e esvaziaria o portão de aprovação.
+      - name: Publicar a imagem candidata com a tag do commit
         if: github.ref == 'refs/heads/main'
         run: |
           IMAGE=$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
           docker tag taskflow-api:${{ github.sha }} "${IMAGE}:${{ github.sha }}"
-          docker tag taskflow-api:${{ github.sha }} "${IMAGE}:latest"
           docker push "${IMAGE}:${{ github.sha }}"
-          docker push "${IMAGE}:latest"
