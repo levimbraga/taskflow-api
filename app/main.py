@@ -1,6 +1,7 @@
 """TaskFlow API - ponto de entrada da aplicação FastAPI."""
 
 from fastapi import FastAPI, HTTPException, status
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app import __version__
 from app.repository import TaskRepository
@@ -11,6 +12,14 @@ app = FastAPI(
     description="API REST de gerenciamento de tarefas - DevOps na Prática (PUCRS)",
     version=__version__,
 )
+
+# Expõe /metrics no formato Prometheus com latência, throughput e taxa de erro
+# por rota. O endpoint é excluído da própria instrumentação para não poluir as
+# séries temporais com as consultas do coletor.
+Instrumentator(
+    excluded_handlers=["/metrics"],
+    should_group_status_codes=False,
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 repository = TaskRepository()
 
