@@ -32,3 +32,18 @@ output "log_group_name" {
   description = "Grupo de logs da aplicação no CloudWatch."
   value       = aws_cloudwatch_log_group.app.name
 }
+
+output "grafana_url" {
+  description = "Painel do Grafana. Só responde a partir de observability_ingress_cidr."
+  value       = "http://${aws_eip.app.public_ip}:3000"
+}
+
+output "prometheus_url" {
+  description = "Interface do Prometheus. Só responde a partir de observability_ingress_cidr."
+  value       = "http://${aws_eip.app.public_ip}:9090"
+}
+
+output "observability_ingress_cidr" {
+  description = "CIDR atualmente autorizado a acessar Grafana e Prometheus."
+  value       = var.observability_ingress_cidr
+}

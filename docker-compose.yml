@@ -35,6 +35,10 @@ services:
       - ALL
     tmpfs:
       - /tmp
+    # Delimita o raio de ação do Watchtower: ele só atualiza contêineres que
+    # carreguem este rótulo, deixando o restante da stack intocado.
+    labels:
+      com.centurylinklabs.watchtower.scope: taskflow
     logging:
       driver: json-file
       options:
@@ -136,7 +140,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     command: --interval 60 --cleanup --scope taskflow --include-restarting
+    # O próprio Watchtower precisa do rótulo para se reconhecer dentro do escopo.
+    labels:
+      com.centurylinklabs.watchtower.scope: taskflow
     environment:
+      # Atualiza uma réplica de cada vez, mantendo a outra atendendo o nginx.
       WATCHTOWER_ROLLING_RESTART: "true"
     networks:
       - observability

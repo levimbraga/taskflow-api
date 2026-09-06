@@ -45,3 +45,31 @@ resource "aws_vpc_security_group_egress_rule" "all" {
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "-1"
 }
+
+# ------------------------------------------------------------------------------
+# Fase 2 - acesso aos painéis de observabilidade.
+#
+# Grafana (3000) e Prometheus (9090) expõem dados operacionais e, no caso do
+# Grafana, uma tela de login. Nenhum dos dois fica aberto para a internet: as
+# duas regras são presas ao mesmo CIDR informado em observability_ingress_cidr,
+# cujo padrão (127.0.0.1/32) mantém as portas efetivamente fechadas até que o
+# operador declare de qual endereço vai acessar.
+# ------------------------------------------------------------------------------
+
+resource "aws_vpc_security_group_ingress_rule" "grafana" {
+  security_group_id = aws_security_group.app.id
+  description       = "Grafana restrito ao CIDR do operador"
+  cidr_ipv4         = var.observability_ingress_cidr
+  from_port         = 3000
+  to_port           = 3000
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "prometheus" {
+  security_group_id = aws_security_group.app.id
+  description       = "Prometheus restrito ao CIDR do operador"
+  cidr_ipv4         = var.observability_ingress_cidr
+  from_port         = 9090
+  to_port           = 9090
+  ip_protocol       = "tcp"
+}
