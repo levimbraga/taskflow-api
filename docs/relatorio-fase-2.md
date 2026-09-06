@@ -769,6 +769,26 @@ $ echo $?
 O código de saída `1` é o esperado: o deploy falhou, ainda que o rollback tenha
 sido bem-sucedido.
 
+### O pipeline executado no Pull Request
+
+O `ci.yml`, já com o job `security`, rodou no Pull Request da Fase 2. Os seis
+jobs terminaram com sucesso, e os horários confirmam que `security`, `test`
+(3.12) e `test` (3.14) começaram no mesmo instante — o paralelismo é real, não
+apenas declarado:
+
+```
+Lint e formatação                 21:20:49 -> 21:21:04
+Validação do Terraform            21:20:49 -> 21:21:03
+Varreduras de segurança           21:21:07 -> 21:22:03
+Testes (Python 3.14)              21:21:07 -> 21:21:21
+Testes (Python 3.12)              21:21:07 -> 21:21:26
+Build da imagem e teste de fumaça 21:22:05 -> 21:22:24
+```
+
+O `build` só começou às 21:22:05, depois que as três etapas anteriores
+terminaram. O relatório SARIF do Trivy chegou à aba Security do repositório,
+registrado sob a categoria `trivy-imagem`, sem nenhum alerta em aberto.
+
 ### O que não foi possível executar
 
 Por honestidade, fica registrado o que **não** pôde ser verificado no ambiente
@@ -781,8 +801,9 @@ de desenvolvimento:
   criada.
 - **Uma execução completa do `cd.yml`.** O pipeline de CD depende do environment
   `producao` existir nas Settings do repositório, o que não pode ser feito por
-  código. A sintaxe do workflow foi validada e a lógica dos jobs revisada, mas a
-  primeira execução real acontecerá após a configuração manual descrita no README.
+  código, e só é disparado por um CI verde na `main`. A sintaxe do workflow foi
+  validada e a lógica dos jobs revisada, mas a primeira execução real acontecerá
+  após o merge e a configuração manual descrita no README.
 - **O Watchtower detectando uma promoção real.** Depende dos dois itens acima.
 
 ---
