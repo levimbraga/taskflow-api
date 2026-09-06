@@ -477,7 +477,7 @@ Todos os números abaixo foram obtidos de execuções reais, transcritas na
 
 | Verificação | Resultado |
 |---|---|
-| `./scripts/lint.sh` | ruff check e ruff format sem apontamentos, 10 arquivos |
+| `./scripts/lint.sh` | ruff check e ruff format sem apontamentos, 11 arquivos |
 | `./scripts/test.sh` | **21 testes**, cobertura total de **97,47%** (mínimo: 90%) |
 | `terraform fmt -check` e `validate` | Formatação limpa, configuração válida |
 | `docker compose config` | Sem erros |
@@ -650,7 +650,7 @@ $ ./scripts/lint.sh
 >> ruff check (lint)
 All checks passed!
 >> ruff format --check (formatação)
-10 files already formatted
+11 files already formatted
 >> Lint concluído com sucesso
 ```
 
