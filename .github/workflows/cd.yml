@@ -1,0 +1,228 @@
+name: CD
+
+# ------------------------------------------------------------------------------
+# Pipeline de Entrega Contínua — modelo *pull-based*.
+#
+# Por que não empurrar o deploy daqui?
+#
+# O projeto roda no AWS Academy Learner Lab, cujas credenciais são de sessão:
+# expiram a cada "Start Lab" e trazem um AWS_SESSION_TOKEN novo. Não existe
+# credencial estável para guardar em `secrets` do GitHub, e as permissões do
+# laboratório também não permitem criar a IAM role que o OIDC exigiria. Um
+# pipeline que fizesse `aws ssm send-command` ou abrisse SSH para o runner
+# quebraria a cada nova sessão do laboratório.
+#
+# A alternativa adotada inverte o sentido do fluxo: o pipeline apenas *promove*
+# a imagem no GitHub Container Registry, e quem puxa a novidade é a própria
+# instância EC2, através do Watchtower, que observa a tag :latest e recria o
+# contêiner sozinho. As vantagens são concretas:
+#
+#   - nenhuma credencial da AWS precisa existir no GitHub;
+#   - a porta 22 permanece fechada, sem faixa de IP de runner liberada no
+#     security group;
+#   - a instância só faz conexões de saída, o que sobrevive a IP dinâmico e a
+#     recriações da infraestrutura;
+#   - o "estado desejado" é a tag do registro, e não um comando imperativo que
+#     pode falhar pela metade.
+#
+# O preço é a latência: o Watchtower verifica o registro a cada 60 segundos,
+# então há uma janela de até um minuto entre a aprovação e o contêiner novo no
+# ar. Para o escopo desta disciplina é uma troca vantajosa.
+# ------------------------------------------------------------------------------
+
+on:
+  # Só dispara depois que o CI inteiro (lint, testes, Terraform, segurança e
+  # build) terminou com sucesso. O filtro de branch é reforçado dentro do job,
+  # porque `workflow_run` também dispara para outras branches.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Permite promover manualmente um commit já validado, por exemplo para
+  # refazer um deploy depois de uma indisponibilidade da instância.
+  workflow_dispatch:
+    inputs:
+      motivo:
+        description: Motivo da promoção manual
+        required: false
+        default: Promoção manual solicitada pelo mantenedor
+
+env:
+  REGISTRO: ghcr.io
+  IMAGEM: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Etapa 1 — Promoção da imagem.
+  #
+  # O `environment: producao` é o portão de aprovação manual: com "Required
+  # reviewers" configurado nas Settings do repositório, o job fica parado
+  # aguardando aprovação humana antes de tocar no registro.
+  # ----------------------------------------------------------------------------
+  promover:
+    name: Promover imagem para produção
+    runs-on: ubuntu-latest
+    # `workflow_run` dispara mesmo quando o CI falha; este filtro garante que só
+    # um CI verde na main chega até aqui. O `workflow_dispatch` passa direto.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    environment:
+      name: producao
+      url: ${{ steps.versao.outputs.url_pacote }}
+    outputs:
+      tag: ${{ steps.versao.outputs.tag }}
+      imagem: ${{ steps.versao.outputs.imagem }}
+      sha: ${{ steps.versao.outputs.sha }}
+    steps:
+      # O commit promovido é o que o CI validou, e não necessariamente a ponta
+      # da main: entre o fim do CI e a aprovação manual podem ter entrado
+      # outros commits que ainda não passaram pelo pipeline.
+      - name: Identificar o commit validado pelo CI
+        id: alvo
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.alvo.outputs.sha }}
+
+      - name: Montar a tag de versão
+        id: versao
+        run: |
+          set -euo pipefail
+          SHA_LONGO="${{ steps.alvo.outputs.sha }}"
+          SHA_CURTO="${SHA_LONGO:0:7}"
+          DATA=$(date -u +'%Y.%m.%d')
+          # Formato: 2026.09.06-a1b2c3d — ordenável por data e rastreável até o
+          # commit exato que originou a imagem.
+          TAG="${DATA}-${SHA_CURTO}"
+          IMAGEM=$(echo "${REGISTRO}/${IMAGEM}" | tr '[:upper:]' '[:lower:]')
+
+          {
+            echo "sha=${SHA_LONGO}"
+            echo "tag=${TAG}"
+            echo "imagem=${IMAGEM}"
+            echo "url_pacote=https://github.com/${GITHUB_REPOSITORY}/pkgs/container/${GITHUB_REPOSITORY##*/}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Promovendo ${IMAGEM}:${SHA_LONGO} para ${TAG} e latest"
+
+      - name: Autenticar no GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRO }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A imagem NÃO é reconstruída: promover é apenas apontar novas tags para o
+      # mesmo digest que o CI construiu e testou. Reconstruir aqui poderia gerar
+      # um binário diferente do que passou pelos testes e pelas varreduras.
+      - name: Promover o digest validado para :latest e para a tag de versão
+        run: |
+          set -euo pipefail
+          ORIGEM="${{ steps.versao.outputs.imagem }}:${{ steps.versao.outputs.sha }}"
+          echo ">> Imagem de origem: ${ORIGEM}"
+
+          if ! docker buildx imagetools inspect "${ORIGEM}" > /dev/null 2>&1; then
+            echo "!! Não existe imagem publicada para o commit ${{ steps.versao.outputs.sha }}." >&2
+            echo "!! Só é possível promover um commit cujo job 'build' do CI tenha rodado na main." >&2
+            exit 1
+          fi
+
+          docker buildx imagetools create \
+            --tag "${{ steps.versao.outputs.imagem }}:${{ steps.versao.outputs.tag }}" \
+            --tag "${{ steps.versao.outputs.imagem }}:latest" \
+            "${ORIGEM}"
+
+      - name: Registrar a promoção no resumo da execução
+        run: |
+          {
+            echo "## Imagem promovida"
+            echo
+            echo "| Campo | Valor |"
+            echo "|---|---|"
+            echo "| Commit | \`${{ steps.versao.outputs.sha }}\` |"
+            echo "| Tag de versão | \`${{ steps.versao.outputs.tag }}\` |"
+            echo "| Tag móvel | \`latest\` |"
+            echo "| Registro | \`${{ steps.versao.outputs.imagem }}\` |"
+            echo
+            echo "O Watchtower na instância EC2 verifica o registro a cada 60 s"
+            echo "e recria o contêiner da aplicação assim que detectar o novo digest."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------------------
+  # Etapa 2 — Verificação da promoção.
+  #
+  # Confirma que as duas tags existem no registro e apontam para o mesmo digest
+  # do commit validado. É o que separa "o comando de push não deu erro" de "a
+  # imagem que a instância vai baixar é realmente a certa".
+  # ----------------------------------------------------------------------------
+  verificar:
+    name: Verificar a imagem no registro
+    runs-on: ubuntu-latest
+    needs: promover
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Autenticar no GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRO }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A propagação no registro não é instantânea; a espera com novas tentativas
+      # evita um falso negativo logo após o push.
+      - name: Aguardar a propagação e conferir os digests
+        run: |
+          set -euo pipefail
+          IMAGEM="${{ needs.promover.outputs.imagem }}"
+          TAG="${{ needs.promover.outputs.tag }}"
+          SHA="${{ needs.promover.outputs.sha }}"
+
+          consultar_digest() {
+            docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null
+          }
+
+          for tentativa in $(seq 1 10); do
+            DIGEST_VERSAO=$(consultar_digest "${IMAGEM}:${TAG}" || true)
+            DIGEST_LATEST=$(consultar_digest "${IMAGEM}:latest" || true)
+
+            if [[ -n "${DIGEST_VERSAO}" && "${DIGEST_VERSAO}" == "${DIGEST_LATEST}" ]]; then
+              echo ">> Tentativa ${tentativa}: as duas tags respondem e apontam para o mesmo digest"
+              echo ">> ${IMAGEM}:${TAG}    -> ${DIGEST_VERSAO}"
+              echo ">> ${IMAGEM}:latest -> ${DIGEST_LATEST}"
+
+              DIGEST_ORIGEM=$(consultar_digest "${IMAGEM}:${SHA}" || true)
+              if [[ "${DIGEST_ORIGEM}" != "${DIGEST_VERSAO}" ]]; then
+                echo "!! A tag de versão não corresponde ao digest do commit validado" >&2
+                exit 1
+              fi
+              echo ">> Confere com o digest do commit ${SHA}"
+
+              {
+                echo "## Verificação concluída"
+                echo
+                echo "As tags \`${TAG}\` e \`latest\` estão acessíveis e apontam para"
+                echo "o digest \`${DIGEST_VERSAO}\`, o mesmo construído a partir do commit"
+                echo "\`${SHA}\`."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+
+            echo ">> Tentativa ${tentativa}: imagem ainda não disponível, aguardando 15 s"
+            sleep 15
+          done
+
+          echo "!! A imagem promovida não ficou acessível no registro" >&2
+          exit 1

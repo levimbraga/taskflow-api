@@ -1,37 +1,113 @@
 #!/bin/bash
-# Script de inicialização da instância, renderizado pelo Terraform.
+# ------------------------------------------------------------------------------
+# Inicialização da instância, renderizada pelo Terraform.
+#
+# A instância não roda mais um contêiner solto: ela sobe a mesma stack do
+# docker-compose.yml usada no desenvolvimento (nginx + duas réplicas da API +
+# Prometheus + Grafana + Loki + Promtail), acrescida do Watchtower através do
+# profile "deploy".
+#
+# O Watchtower é a ponta receptora da entrega contínua: ele observa a tag
+# :latest no GitHub Container Registry e recria as réplicas da aplicação assim
+# que o pipeline de CD promove uma imagem nova. É por isso que nenhuma
+# credencial da AWS precisa existir no GitHub e a porta 22 pode ficar fechada.
+# ------------------------------------------------------------------------------
 set -euxo pipefail
 
+exec > >(tee -a /var/log/taskflow-bootstrap.log) 2>&1
+
+DIRETORIO=/opt/taskflow
+
+# ---- 1. Docker, plugin do Compose e utilitários ------------------------------
 dnf update -y
-dnf install -y docker
+dnf install -y docker git amazon-cloudwatch-agent
+
+# O plugin do Compose não vem nos repositórios do Amazon Linux 2023; é instalado
+# como plugin de CLI do Docker, o que habilita "docker compose" (v2).
+VERSAO_COMPOSE="v2.40.3"
+install -d -m 0755 /usr/local/lib/docker/cli-plugins
+curl -fsSL \
+  "https://github.com/docker/compose/releases/download/$${VERSAO_COMPOSE}/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
 systemctl enable --now docker
 usermod -aG docker ec2-user
+docker compose version
 
-# Agente do CloudWatch para enviar os logs do contêiner ao grupo criado pelo Terraform
-dnf install -y amazon-cloudwatch-agent
+# ---- 2. Arquivos de orquestração ---------------------------------------------
+# Clona o repositório para obter docker-compose.yml e todo o diretório ops/
+# (nginx, Prometheus, Loki, Promtail e o provisionamento do Grafana).
+rm -rf "$${DIRETORIO}"
+git clone --depth 1 --branch "${repo_ref}" "${repo_url}" "$${DIRETORIO}"
+cd "$${DIRETORIO}"
 
-docker pull ${container_image}
+# ---- 3. Configuração da stack ------------------------------------------------
+# O .env é lido pelo Compose e fica fora do repositório. A senha do Grafana vem
+# de uma variável marcada como sensitive no Terraform, e o arquivo é restrito ao
+# root para não ficar legível por outros usuários da instância.
+umask 077
+cat > "$${DIRETORIO}/.env" <<ENV
+TASKFLOW_IMAGE=${container_image}
+GRAFANA_USER=${grafana_admin_user}
+GRAFANA_PASSWORD=${grafana_admin_password}
+ENV
+chmod 600 "$${DIRETORIO}/.env"
+umask 022
 
-docker run -d \
-  --name taskflow-api \
-  --restart unless-stopped \
-  -p 80:${app_port} \
-  --log-driver=awslogs \
-  --log-opt awslogs-region=${aws_region} \
-  --log-opt awslogs-group=${log_group} \
-  --log-opt awslogs-create-group=true \
-  ${container_image}
+# ---- 4. Envio dos logs dos contêineres ao CloudWatch -------------------------
+# Os contêineres usam o driver json-file (exigência do Promtail, que lê os
+# arquivos de log locais). O agente do CloudWatch replica esses mesmos arquivos
+# para o grupo de logs criado pelo Terraform, dando uma cópia dos logs que
+# sobrevive à destruição da instância.
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<CWAGENT
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/lib/docker/containers/*/*-json.log",
+            "log_group_name": "${log_group}",
+            "log_stream_name": "{instance_id}/containers",
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/taskflow-bootstrap.log",
+            "log_group_name": "${log_group}",
+            "log_stream_name": "{instance_id}/bootstrap",
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  }
+}
+CWAGENT
 
-# Teste de fumaça pós-deploy: aguarda a aplicação responder antes de concluir
-for attempt in $(seq 1 30); do
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+# ---- 5. Subida da stack com o profile de deploy ------------------------------
+# O profile "deploy" acrescenta o Watchtower, que só faz sentido na instância:
+# no ambiente de desenvolvimento a imagem é construída localmente.
+docker compose --profile deploy pull
+docker compose --profile deploy up -d --no-build --remove-orphans
+
+# ---- 6. Teste de fumaça pós-deploy -------------------------------------------
+# A instância só é considerada pronta depois que a aplicação responde através do
+# nginx, e não apenas quando os contêineres foram criados.
+for tentativa in $(seq 1 40); do
   if curl -fsS http://localhost/health > /dev/null; then
-    echo "TaskFlow API respondeu ao health check na tentativa $attempt"
+    echo "TaskFlow API respondeu ao health check na tentativa $tentativa"
+    docker compose --profile deploy ps
     exit 0
   fi
   sleep 5
 done
 
-echo "A aplicacao nao respondeu ao health check apos 30 tentativas" >&2
-docker logs taskflow-api >&2
+echo "A aplicacao nao respondeu ao health check apos 40 tentativas" >&2
+docker compose --profile deploy ps >&2
+docker compose --profile deploy logs --tail=100 >&2
 exit 1

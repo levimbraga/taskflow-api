@@ -50,12 +50,6 @@ variable "container_image" {
   default     = "ghcr.io/levimbraga/taskflow-api:latest"
 }
 
-variable "app_port" {
-  description = "Porta em que o contêiner da aplicação escuta."
-  type        = number
-  default     = 8000
-}
-
 variable "ssh_ingress_cidr" {
   description = "CIDR autorizado a abrir SSH. Restrinja ao seu IP; nunca use 0.0.0.0/0."
   type        = string
@@ -78,4 +72,52 @@ variable "log_retention_days" {
   description = "Retenção dos logs no CloudWatch, em dias."
   type        = number
   default     = 7
+}
+
+# ------------------------------------------------------------------------------
+# Fase 2 - stack de containers e observabilidade na instância
+# ------------------------------------------------------------------------------
+
+variable "observability_ingress_cidr" {
+  description = <<-DESC
+    CIDR autorizado a acessar o Grafana (3000) e o Prometheus (9090).
+    O padrão 127.0.0.1/32 fecha as portas: só a própria instância se enxerga.
+    Informe o seu IP no formato SEU.IP.AQUI/32 para abrir o acesso.
+  DESC
+  type        = string
+  default     = "127.0.0.1/32"
+
+  validation {
+    condition     = var.observability_ingress_cidr != "0.0.0.0/0"
+    error_message = "Os painéis de observabilidade não podem ficar abertos para a internet inteira."
+  }
+}
+
+variable "grafana_admin_password" {
+  description = "Senha do usuário admin do Grafana. Nunca versione este valor."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.grafana_admin_password) >= 12
+    error_message = "Use uma senha com pelo menos 12 caracteres."
+  }
+}
+
+variable "grafana_admin_user" {
+  description = "Usuário administrador do Grafana."
+  type        = string
+  default     = "admin"
+}
+
+variable "repo_url" {
+  description = "Repositório clonado na instância para obter os arquivos de orquestração."
+  type        = string
+  default     = "https://github.com/levimbraga/taskflow-api.git"
+}
+
+variable "repo_ref" {
+  description = "Branch ou tag do repositório a ser usada na instância."
+  type        = string
+  default     = "main"
 }

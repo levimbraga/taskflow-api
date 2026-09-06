@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    projeto: taskflow
+    ambiente: dev
+
+scrape_configs:
+  - job_name: taskflow-api
+    metrics_path: /metrics
+    # Resolução por DNS do Compose: descobre todas as réplicas de "app".
+    dns_sd_configs:
+      - names: ["app"]
+        type: A
+        port: 8000
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

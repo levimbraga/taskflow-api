@@ -1,6 +1,7 @@
 # ------------------------------------------------------------------------------
-# Camada de computação: uma instância EC2 executando o contêiner publicado
-# pelo pipeline de CI.
+# Camada de computação: uma instância EC2 executando a stack de contêineres
+# orquestrada pelo Docker Compose — nginx, duas réplicas da API e a pilha de
+# observabilidade — mais o Watchtower, que recebe as entregas do pipeline de CD.
 #
 # IMPORTANTE (AWS Academy Learner Lab): a conta do laboratório não permite
 # criar IAM roles. Por isso o perfil de instância NÃO é criado aqui - o código
@@ -44,10 +45,12 @@ resource "aws_instance" "app" {
 
   user_data_replace_on_change = true
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
-    container_image = var.container_image
-    app_port        = var.app_port
-    log_group       = aws_cloudwatch_log_group.app.name
-    aws_region      = var.aws_region
+    container_image        = var.container_image
+    log_group              = aws_cloudwatch_log_group.app.name
+    repo_url               = var.repo_url
+    repo_ref               = var.repo_ref
+    grafana_admin_user     = var.grafana_admin_user
+    grafana_admin_password = var.grafana_admin_password
   })
 
   root_block_device {
