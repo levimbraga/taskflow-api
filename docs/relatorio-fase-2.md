@@ -173,30 +173,38 @@ O job `verificar` então confirma no registro que as duas tags respondem e
 compartilham o digest do commit promovido, com até dez tentativas espaçadas de
 15 segundos para absorver a propagação.
 
-#### Passo 5 — A instância puxa sozinha
+#### Passo 5 — A instância puxa sozinha (comportamento projetado)
 
-Na EC2, o Watchtower — subido pelo `user_data` com o profile `deploy` — consulta
-o registro a cada 60 segundos. Ao ver que `:latest` mudou de digest:
+Os dois passos seguintes descrevem o comportamento **projetado e declarado em
+código** — no `user_data` do Terraform e nos rótulos do `docker-compose.yml` —,
+ainda **não exercitado em instância real**: a EC2 nunca chegou a ser criada, como
+registra a seção "O que não foi possível executar".
 
-1. baixa a imagem nova;
-2. recria **uma réplica de cada vez** (`WATCHTOWER_ROLLING_RESTART`), de modo que
-   a outra continua atendendo o nginx durante a troca;
-3. remove a imagem antiga (`--cleanup`), poupando disco na `t3.micro`.
+Na EC2, o Watchtower — subido pelo `user_data` com o profile `deploy` —
+consultaria o registro a cada 60 segundos. Ao ver que `:latest` mudou de digest,
+ele deve:
+
+1. baixar a imagem nova;
+2. recriar **uma réplica de cada vez** (`WATCHTOWER_ROLLING_RESTART`), de modo
+   que a outra continue atendendo o nginx durante a troca;
+3. remover a imagem antiga (`--cleanup`), poupando disco na `t3.micro`.
 
 O `--scope taskflow` limita o raio de ação: só contêineres que carregam o rótulo
-`com.centurylinklabs.watchtower.scope=taskflow` são atualizados. O Prometheus, o
-Grafana e o Loki ficam intocados.
+`com.centurylinklabs.watchtower.scope=taskflow` seriam atualizados. O Prometheus,
+o Grafana e o Loki ficariam intocados.
 
-#### Passo 6 — Verificação
+#### Passo 6 — Verificação (resultado esperado)
+
+Com a instância no ar, a conferência seria feita pelo IP público:
 
 ```bash
 curl http://<ip-da-instancia>/health
-# {"status":"ok","version":"1.1.0"}
+# resultado esperado: {"status":"ok","version":"<versão promovida>"}
 ```
 
-Nenhuma credencial da AWS foi usada pelo GitHub. Nenhuma porta de entrada além
-da 80 esteve aberta. O único artefato que atravessou a fronteira foi a imagem,
-puxada pela instância.
+Por construção, nenhuma credencial da AWS é usada pelo GitHub e nenhuma porta de
+entrada além da 80 fica aberta: o único artefato que atravessaria a fronteira é a
+imagem, puxada pela instância.
 
 #### Alternativa manual, com rollback automático
 
@@ -789,6 +797,24 @@ O `build` só começou às 21:22:05, depois que as três etapas anteriores
 terminaram. O relatório SARIF do Trivy chegou à aba Security do repositório,
 registrado sob a categoria `trivy-imagem`, sem nenhum alerta em aberto.
 
+### As duas execuções do CD
+
+O `cd.yml` foi executado duas vezes de verdade, ambas disparadas por
+`workflow_run` depois de um CI verde na `main` e ambas retidas no portão do
+environment `producao` até a aprovação manual.
+
+**Run 34063307371** (commit `85ea98b`): a promoção foi aprovada e o job
+`promover` concluiu com sucesso; o job `verificar` reprovou — por um defeito da
+própria verificação, não da imagem. Ela comparava o digest do índice OCI criado
+por `docker buildx imagetools create` com o digest do manifesto publicado pelo
+CI, dois valores que jamais poderiam coincidir. A correção em `77a36cd` passou a
+resolver e comparar o digest do manifesto `linux/amd64` de cada referência.
+
+**Run 34264720195** (commit `8a2d38b`): novamente aprovada no environment
+`producao`, concluiu com os dois jobs em sucesso — `promover` e `verificar` —,
+confirmando no registro que `:latest` e a tag versionada apontam para o mesmo
+digest do commit promovido.
+
 ### O que não foi possível executar
 
 Por honestidade, fica registrado o que **não** pôde ser verificado no ambiente
@@ -799,12 +825,11 @@ de desenvolvimento:
   `fmt -check` e com a renderização do `user_data.sh.tftpl`, cujo script
   resultante foi validado sintaticamente com `bash -n` — mas a instância não foi
   criada.
-- **Uma execução completa do `cd.yml`.** O pipeline de CD depende do environment
-  `producao` existir nas Settings do repositório, o que não pode ser feito por
-  código, e só é disparado por um CI verde na `main`. A sintaxe do workflow foi
-  validada e a lógica dos jobs revisada, mas a primeira execução real acontecerá
-  após o merge e a configuração manual descrita no README.
-- **O Watchtower detectando uma promoção real.** Depende dos dois itens acima.
+- **O Watchtower detectando uma promoção real.** Depende do item acima: sem a
+  instância criada, não há Watchtower em execução para reagir. A promoção em si
+  aconteceu — o `cd.yml` foi executado duas vezes, com aprovação manual no
+  environment `producao` (ver "As duas execuções do CD") —, mas nenhuma máquina
+  chegou a puxar a imagem promovida.
 
 ---
 
