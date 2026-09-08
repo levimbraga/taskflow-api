@@ -181,48 +181,199 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # ------------------------------------------------------------------------
+      # Por que a comparação é feita em nível de PLATAFORMA, e não pelo digest da
+      # referência inteira?
+      #
+      # O CI publica a tag do commit como um manifesto único. O passo de promoção
+      # usa `docker buildx imagetools create`, que ENVELOPA esse manifesto único
+      # em um índice OCI e aponta as novas tags para o índice. O digest de um
+      # índice é o hash do índice, e por definição nunca é igual ao digest do
+      # manifesto que ele contém — mesmo sendo exatamente a mesma imagem.
+      #
+      # Comparar `:latest` com `:<sha>` no nível da referência, portanto, compara
+      # duas coisas que jamais poderiam coincidir, e a verificação reprovava uma
+      # promoção correta. O que de fato identifica a imagem é o digest do
+      # manifesto `linux/amd64`, derivado do conteúdo das camadas: ele não muda
+      # ao reetiquetar nem ao embrulhar o manifesto em um índice.
+      #
+      # A consulta é feita direto na API do registro, e não por
+      # `docker buildx imagetools`, porque assim o digest vem do próprio GHCR,
+      # sem depender de reserialização local do manifesto.
+      #
       # A propagação no registro não é instantânea; a espera com novas tentativas
-      # evita um falso negativo logo após o push.
-      - name: Aguardar a propagação e conferir os digests
+      # evita um falso negativo logo após o push. A espera vale APENAS para o caso
+      # de "ainda não disponível": uma divergência real de digest reprova na hora,
+      # sem gastar dez tentativas.
+      - name: Aguardar a propagação e conferir os digests de plataforma
         run: |
           set -euo pipefail
           IMAGEM="${{ needs.promover.outputs.imagem }}"
           TAG="${{ needs.promover.outputs.tag }}"
           SHA="${{ needs.promover.outputs.sha }}"
+          # "ghcr.io/dono/projeto" -> "dono/projeto", o escopo aceito pela API.
+          REPOSITORIO="${IMAGEM#*/}"
+          PLATAFORMA="linux/amd64"
 
-          consultar_digest() {
-            docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null
+          # As funções abaixo devolvem o resultado em variáveis globais, e não pela
+          # saída padrão: `valor=$(funcao)` roda a função em um subshell, e o
+          # motivo do erro registrado lá dentro se perderia no retorno — foi assim
+          # que a versão anterior conseguiu tratar "não encontrei" como se fosse
+          # uma comparação bem-sucedida entre dois valores vazios.
+          TOKEN=""
+          DIGEST_RESOLVIDO=""
+          MOTIVO=""
+
+          obter_token() {
+            local resposta
+            TOKEN=""
+            MOTIVO=""
+            # Sem `2>/dev/null` e sem `|| true`: silenciar o erro foi o que fazia
+            # uma consulta malsucedida ser relatada como digest divergente.
+            if ! resposta=$(curl -sS --fail-with-body \
+              "https://ghcr.io/token?scope=repository:${REPOSITORIO}:pull" 2>&1); then
+              MOTIVO="consulta falhou: não foi possível obter o token de pull (${resposta})"
+              return 1
+            fi
+            TOKEN=$(printf '%s' "${resposta}" | jq -r '.token // empty')
+            if [[ -z "${TOKEN}" ]]; then
+              MOTIVO="consulta falhou: o registro não devolveu um token de pull"
+              return 1
+            fi
           }
 
-          for tentativa in $(seq 1 10); do
-            DIGEST_VERSAO=$(consultar_digest "${IMAGEM}:${TAG}" || true)
-            DIGEST_LATEST=$(consultar_digest "${IMAGEM}:latest" || true)
+          # Resolve o digest do manifesto linux/amd64 da referência recebida e o
+          # deixa em DIGEST_RESOLVIDO. Em caso de erro devolve 1 e descreve a causa
+          # em MOTIVO, distinguindo "consulta falhou" de "digest ausente".
+          digest_plataforma() {
+            local referencia="$1"
+            local cabecalhos corpo status digest
+            DIGEST_RESOLVIDO=""
+            MOTIVO=""
 
-            if [[ -n "${DIGEST_VERSAO}" && "${DIGEST_VERSAO}" == "${DIGEST_LATEST}" ]]; then
-              echo ">> Tentativa ${tentativa}: as duas tags respondem e apontam para o mesmo digest"
-              echo ">> ${IMAGEM}:${TAG}    -> ${DIGEST_VERSAO}"
-              echo ">> ${IMAGEM}:latest -> ${DIGEST_LATEST}"
+            cabecalhos=$(mktemp)
+            corpo=$(mktemp)
 
-              DIGEST_ORIGEM=$(consultar_digest "${IMAGEM}:${SHA}" || true)
-              if [[ "${DIGEST_ORIGEM}" != "${DIGEST_VERSAO}" ]]; then
-                echo "!! A tag de versão não corresponde ao digest do commit validado" >&2
-                exit 1
-              fi
-              echo ">> Confere com o digest do commit ${SHA}"
-
-              {
-                echo "## Verificação concluída"
-                echo
-                echo "As tags \`${TAG}\` e \`latest\` estão acessíveis e apontam para"
-                echo "o digest \`${DIGEST_VERSAO}\`, o mesmo construído a partir do commit"
-                echo "\`${SHA}\`."
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
+            # Os quatro Accept cobrem as duas famílias de mídia (OCI e Docker v2)
+            # nas duas formas (índice/lista e manifesto único). Sem eles o registro
+            # pode devolver uma conversão em outro formato.
+            if ! status=$(curl -sS -o "${corpo}" -D "${cabecalhos}" -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json" \
+              -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${REPOSITORIO}/manifests/${referencia}"); then
+              MOTIVO="consulta falhou: erro de rede ao consultar ${IMAGEM}:${referencia}"
+              rm -f "${cabecalhos}" "${corpo}"
+              return 1
             fi
 
-            echo ">> Tentativa ${tentativa}: imagem ainda não disponível, aguardando 15 s"
-            sleep 15
-          done
+            if [[ "${status}" != "200" ]]; then
+              MOTIVO="consulta falhou: o registro respondeu HTTP ${status} para ${IMAGEM}:${referencia}"
+              rm -f "${cabecalhos}" "${corpo}"
+              return 1
+            fi
 
-          echo "!! A imagem promovida não ficou acessível no registro" >&2
-          exit 1
+            if jq -e 'has("manifests")' "${corpo}" > /dev/null 2>&1; then
+              # Índice OCI ou lista de manifestos: o digest que interessa é o da
+              # entrada da plataforma, não o do índice que a embrulha.
+              digest=$(jq -r --arg so "${PLATAFORMA%/*}" --arg arq "${PLATAFORMA#*/}" '
+                .manifests[]
+                | select(.platform.os == $so and .platform.architecture == $arq)
+                | .digest' "${corpo}" | head -n 1)
+            else
+              # Manifesto único: o próprio registro informa o digest no cabeçalho.
+              digest=$(grep -i '^docker-content-digest:' "${cabecalhos}" \
+                | tail -n 1 | tr -d '\r' | awk '{print $2}')
+            fi
+
+            rm -f "${cabecalhos}" "${corpo}"
+
+            if [[ -z "${digest}" || "${digest}" == "null" ]]; then
+              MOTIVO="digest ausente: ${IMAGEM}:${referencia} respondeu, mas não traz manifesto ${PLATAFORMA}"
+              return 1
+            fi
+
+            DIGEST_RESOLVIDO="${digest}"
+          }
+
+          TENTATIVAS=10
+          ESPERA=15
+
+          for tentativa in $(seq 1 "${TENTATIVAS}"); do
+            INDISPONIVEL=""
+            DIGEST_VERSAO=""
+            DIGEST_LATEST=""
+            DIGEST_COMMIT=""
+
+            if ! obter_token; then
+              INDISPONIVEL="${MOTIVO}"
+            else
+              for par in "DIGEST_VERSAO:${TAG}" "DIGEST_LATEST:latest" "DIGEST_COMMIT:${SHA}"; do
+                variavel="${par%%:*}"
+                referencia="${par#*:}"
+                if digest_plataforma "${referencia}"; then
+                  printf -v "${variavel}" '%s' "${DIGEST_RESOLVIDO}"
+                else
+                  INDISPONIVEL="${MOTIVO}"
+                  break
+                fi
+              done
+            fi
+
+            # Guarda explícita: nenhuma referência pode chegar vazia à comparação,
+            # sob pena de dois vazios "coincidirem" e aprovarem uma promoção que
+            # nunca foi conferida.
+            if [[ -z "${INDISPONIVEL}" ]] &&
+               [[ -z "${DIGEST_VERSAO}" || -z "${DIGEST_LATEST}" || -z "${DIGEST_COMMIT}" ]]; then
+              INDISPONIVEL="digest ausente: alguma referência ficou sem digest ${PLATAFORMA}"
+            fi
+
+            # Casos 1 e 2 — consulta falhou ou digest ausente. Os dois ainda podem
+            # ser propagação em andamento, então valem nova tentativa.
+            if [[ -n "${INDISPONIVEL}" ]]; then
+              echo ">> Tentativa ${tentativa}/${TENTATIVAS}: ${INDISPONIVEL}"
+              if (( tentativa < TENTATIVAS )); then
+                echo ">> Aguardando ${ESPERA} s antes de tentar de novo"
+                sleep "${ESPERA}"
+                continue
+              fi
+              echo "!! A imagem promovida não ficou acessível no registro após ${TENTATIVAS} tentativas" >&2
+              echo "!! Última causa: ${INDISPONIVEL}" >&2
+              exit 1
+            fi
+
+            echo ">> Digests de plataforma (${PLATAFORMA}) resolvidos pelo registro:"
+            echo ">>   ${IMAGEM}:${TAG} -> ${DIGEST_VERSAO}"
+            echo ">>   ${IMAGEM}:latest -> ${DIGEST_LATEST}"
+            echo ">>   ${IMAGEM}:${SHA} -> ${DIGEST_COMMIT}"
+
+            # Caso 3 — as três referências responderam, mas apontam para camadas
+            # diferentes. Isso é defeito de verdade: reprova imediatamente, sem
+            # gastar as tentativas restantes esperando por algo que não vai mudar.
+            if [[ "${DIGEST_VERSAO}" != "${DIGEST_LATEST}" || "${DIGEST_VERSAO}" != "${DIGEST_COMMIT}" ]]; then
+              echo "!! Digests divergentes: as três referências existem no registro," >&2
+              echo "!! mas não apontam para o mesmo manifesto ${PLATAFORMA}." >&2
+              echo "!! A imagem que a instância baixaria não é a validada pelo CI." >&2
+              exit 1
+            fi
+
+            echo ">> As três referências apontam para o mesmo manifesto ${PLATAFORMA}"
+
+            {
+              echo "## Verificação concluída"
+              echo
+              echo "| Referência | Digest de plataforma (\`${PLATAFORMA}\`) |"
+              echo "|---|---|"
+              echo "| \`${TAG}\` | \`${DIGEST_VERSAO}\` |"
+              echo "| \`latest\` | \`${DIGEST_LATEST}\` |"
+              echo "| \`${SHA}\` | \`${DIGEST_COMMIT}\` |"
+              echo
+              echo "As tags promovidas são um índice OCI que aponta para o mesmo manifesto"
+              echo "\`${PLATAFORMA}\` validado pelo CI: por isso a conferência compara o digest"
+              echo "de plataforma \`${DIGEST_VERSAO}\`, e não o digest do índice, que muda a cada"
+              echo "reetiquetagem."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          done
